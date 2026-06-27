@@ -11,13 +11,13 @@
 
 set -e
 
-# ---- 激活 conda 环境 ----
-source /home/vipuser/miniconda3/bin/activate
+PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+MODEL_PATH="${MODEL_PATH:-Qwen/Qwen2.5-1.5B-Instruct}"
+DATA_PATH="${DATA_PATH:-./dataset/plan_execute_500.jsonl}"
+SAVE_DIR="${SAVE_DIR:-./checkpoints_qwen_plan}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
 
-# ---- 模型与数据 ----
-MODEL_PATH="/root/.cache/modelscope/hub/models/Qwen/Qwen2___5-1___5B-Instruct"
-DATA_PATH="./dataset/plan_execute_500.jsonl"
-SAVE_DIR="./checkpoints_qwen_plan"
+cd "${PROJECT_ROOT}"
 
 # ---- 训练超参 ----
 EPOCHS=1                # 先跑 1 epoch 验证
@@ -58,7 +58,7 @@ if [ -n "${CURRICULUM_PHASE}" ]; then
     echo "  Curriculum Phase: ${CURRICULUM_PHASE}"
 fi
 
-python agent_plan_qwen.py \
+"${PYTHON_BIN}" agent_plan_qwen.py \
     --mode train \
     --model_path "${MODEL_PATH}" \
     --data_path "${DATA_PATH}" \

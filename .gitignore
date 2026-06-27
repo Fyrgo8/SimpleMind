@@ -17,3 +17,9 @@ server_backup/
 *.bin
 *.safetensors
 checkpoints*/
+benchmark_logs/*
+!benchmark_logs/selected/
+!benchmark_logs/selected/**
+trainer/logs/*
+!trainer/logs/selected/
+!trainer/logs/selected/**

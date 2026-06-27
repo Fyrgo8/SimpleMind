@@ -9,13 +9,13 @@
 
 set -e
 
-# ---- 激活 conda 环境 ----
-source /usr/local/miniconda3/bin/activate py312
+PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+MODEL_PATH="${MODEL_PATH:-Qwen/Qwen2.5-1.5B-Instruct}"
+DATA_PATH="${DATA_PATH:-./dataset/agent_handoff.jsonl}"
+SAVE_DIR="${SAVE_DIR:-./checkpoints_qwen_handoff}"
+PYTHON_BIN="${PYTHON_BIN:-python}"
 
-# ---- 模型与数据 ----
-MODEL_PATH="/root/.cache/modelscope/hub/models/Qwen/Qwen2___5-1___5B-Instruct"
-DATA_PATH="./dataset/agent_handoff.jsonl"
-SAVE_DIR="./checkpoints_qwen_handoff"
+cd "${PROJECT_ROOT}"
 
 # ---- 训练超参 ----
 EPOCHS=3
@@ -45,7 +45,7 @@ echo "  Save: ${SAVE_DIR}"
 echo "  Effective batch: ${BATCH_SIZE} × ${ACCUMULATION} = $((BATCH_SIZE * ACCUMULATION))"
 echo "================================================================"
 
-python agent_handoff_qwen.py \
+"${PYTHON_BIN}" agent_handoff_qwen.py \
     --mode train \
     --model_path "${MODEL_PATH}" \
     --data_path "${DATA_PATH}" \

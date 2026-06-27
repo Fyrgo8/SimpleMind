@@ -1,127 +1,185 @@
 # SimpleMind
 
-基于 [MiniMind](https://github.com/jingyaogong/minimind) 的 LLM Agent 训练与推理实验项目。从 64M 参数超小模型的原型验证出发，逐步扩展到 Qwen2.5-1.5B 的工程化 RL 训练和 Qwen2.5-7B 的推理引擎实现，覆盖 **预训练 → SFT → 数据质量工程 → Agent 强化学习 → 推理优化** 完整链路。
+`SimpleMind` is my end-to-end LLM agent training and inference project built on top of [MiniMind](https://github.com/jingyaogong/minimind).
 
----
+The repo is intentionally broad: it starts from a `64M` prototype model for fast RL iteration, then scales key ideas to `Qwen2.5-1.5B` for multi-step agent RL and to `Qwen2.5-7B` for inference-system experiments.
 
-## 核心实验
+The main reason this project exists is not to show a single benchmark score, but to demonstrate a full chain:
 
-### 1. Plan-then-Execute 多步 Agent RL（Qwen2.5-1.5B）
+`pretrain -> SFT -> reward design -> agent RL -> evaluation -> inference optimization`
 
-在 2×A100-80GB 上训练 Router/Expert 多 Agent 架构。Router 接收用户请求后输出 `execute_plan` 工具调用，按拓扑序分派 Expert 执行子任务，最终 Synthesize 整合回答。
+## Core project claims
 
-训练范式为 SFT Warmup（格式植入）→ GRPO 策略优化 → Eval 三阶段。引入 Router/Expert 信用分离机制，规划阶段和执行阶段的梯度独立更新，互不干扰。
+### 1. Plan-then-Execute RL works on 1.5B models
 
-测试集结果：多步规划准确率 98%（49/50）、端到端成功率 58%（29/50）。端到端损耗主要来自 Expert 的 tool_call 格式遵循问题——模型学会了正确决策但未完全学会输出格式，验证了 SFT+RL 二阶段训练的必要性。
+I built a Router / Expert multi-agent setup where:
 
-### 2. SFT→RL 数据分布传递效应（Qwen2.5-1.5B）
+- Router outputs an `execute_plan`
+- Experts execute sub-tasks in dependency order
+- Synthesize stage aggregates final answers
 
-在 Handoff 单步路由实验中发现：SFT warmup 78% 的 tool_call 样本配比直接决定了 RL 的策略起点，导致误触率（不需要工具时仍发起委托）收敛于 80%，RL 阶段的 -0.3 惩罚无法翻转这个先验。
+On the held-out evaluation split:
 
-根因诊断后设计三方修复：SFT 配比对齐目标分布（78%→56%）、RL 数据扩充 none 类样本（24%→37%）、非对称 reward 设计（误触惩罚系数 1.5x + 渐进式惩罚）。
+- multi-step planning accuracy: `98%` (`49/50`)
+- end-to-end success rate: `58%` (`29/50`)
 
-### 3. 数据质量自动过滤（MiniMind 64M）
+The main residual failure mode is not planning itself, but `tool_call` format adherence in downstream execution.
 
-基于模型 PPL 信号实现自动数据过滤管线：PPL 批量计算 → KDE 谷点检测自动定阈值 → 长度归一化消除系统偏差。分桶对比实验（8 桶各自独立训练）验证倒 U 型贡献曲线——极端段 val loss 较中间段高 24%。裁剪 35% 低贡献数据后 val loss 无损。
+### 2. SFT data distribution directly affects RL policy initialization
 
-### 4. Continuous Batching 推理引擎（Qwen2.5-7B, RTX 4090）
+In the handoff routing setup, I observed that SFT warmup does not only teach format, it also injects policy bias.
 
-从零实现教学级 CB 引擎，包含三种模式：Serial（baseline）、CB Sequential Decode（调度优化）、CB Batched Decode（批量 forward）。适配 HuggingFace transformers 5.9.0 DynamicCache API，实现左 padding KV Cache 对齐。
+- With `78%` positive tool-call samples in SFT warmup, RL inherits a strong false-trigger prior.
+- The RL stage alone cannot easily reverse that prior with weak negative reward.
 
-32 请求压测下 P95 延迟从 36s 降至 2.4s（15x 改善）。Batch Scaling 实验（bs=1/2/4/8 吞吐无差异）定位 Python 层面 KV Cache pad/cat/slice 操作为吞吐瓶颈，实证了 PagedAttention 必须 CUDA 实现的根因。
+This led to a three-part fix:
 
-### 5. 64M 模型 RL 能力边界探索（MiniMind 64M）
+- align SFT class ratio toward the target distribution
+- increase `none` examples during RL
+- use asymmetric penalty design for false-trigger behavior
 
-在 64M 参数模型上完成了 Agent RL 的完整方法论验证：v1~v3 排除超参干扰定位 reward 函数结构性 mismatch → v4/v5 修复后首次获得正奖励 → v5 后期捕获 Reward Hacking（输出退化为无意义短文本刷分）→ Plan RL v4~v6 逐步打通 plan→execute 链路。最终确认 64M 参数存在容量天花板（PlanRate 从 64% 缓慢衰减至 3%），但训练机制和方法论可直接迁移到更大模型。
+### 3. PPL-driven data filtering is useful even for small-model training
 
----
+I implemented a data-quality pipeline:
 
-## 项目结构
+- batch PPL scoring
+- KDE valley detection for threshold selection
+- length normalization to reduce systematic bias
 
+The bucketed experiments show a clear inverted-U contribution curve, and trimming `35%` of low-value data does not hurt validation loss.
+
+### 4. Continuous batching bottleneck is often Python-side, not just model-side
+
+I implemented a teaching-oriented continuous batching engine for `Qwen2.5-7B` and compared:
+
+- serial baseline
+- sequential decode scheduling
+- batched decode
+
+At `32` concurrent requests, `P95` latency drops from `36s` to `2.4s` (`15x`). The scaling experiments show the next bottleneck is Python-side KV-cache pad/cat/slice overhead, which is exactly why production-grade paged attention needs CUDA-level implementation.
+
+### 5. 64M prototypes are useful for RL method iteration, even when they hit a capability ceiling
+
+The `64M` branch of this repo is where I iterated quickly on:
+
+- reward mismatch diagnosis
+- reward hacking detection
+- plan-execute training flow
+- RL stability debugging
+
+The final conclusion is not that `64M` is enough, but that it is a useful experimental vehicle for finding broken reward design and training logic before moving to larger models.
+
+## Fast navigation
+
+If you are reading this repo from a resume or interview context, start here:
+
+- `README.md`
+  - project overview and main results
+- `agent_plan_qwen.py`
+  - 1.5B plan-then-execute RL main logic
+- `agent_handoff_qwen.py`
+  - 1.5B handoff RL pipeline
+- `scripts/continuous_batching_engine.py`
+  - continuous batching engine implementation
+- `scripts/data_quality_scorer.py`
+  - PPL-based data filtering
+- `docs/实验记录/`
+  - experiment reports and analysis
+- `trainer/logs/selected/`
+  - representative raw logs
+- `benchmark_logs/selected/`
+  - representative batching benchmark logs
+
+## Project structure
+
+```text
+SimpleMind/
+├── model/
+├── trainer/
+│   ├── train_agent.py
+│   ├── train_plan.py
+│   ├── train_pretrain.py
+│   ├── train_full_sft.py
+│   ├── train_grpo.py
+│   ├── train_dpo.py
+│   ├── train_ppo.py
+│   └── logs/selected/
+├── scripts/
+│   ├── continuous_batching_engine.py
+│   ├── benchmark_continuous_batching.py
+│   ├── data_quality_scorer.py
+│   ├── run_handoff_qwen_single.sh
+│   ├── run_plan_qwen.sh
+│   └── run_benchmark.sh
+├── docs/
+│   └── 实验记录/
+├── benchmark_logs/
+│   └── selected/
+├── agent_handoff_qwen.py
+├── agent_plan_qwen.py
+├── eval_handoff.py
+└── eval_plan.py
 ```
-model/                          模型定义（Dense + MoE）
-trainer/
-  train_agent.py                Agent RL 训练（多轮工具调用 GRPO）
-  train_plan.py                 Plan-then-Execute RL（64M, v6）
-  agent_handoff.py              多 Agent Handoff 框架（64M）
-  rollout_engine.py             Rollout 引擎
-  train_pretrain.py             预训练
-  train_full_sft.py             全参 SFT
-  train_grpo.py                 GRPO 基础实现
-  train_dpo.py / train_ppo.py   DPO / PPO
-  train_lora.py                 LoRA 微调
-  train_distillation.py         知识蒸馏
-  logs/                         全量实验日志（64M + 1.5B）
-agent_handoff_qwen.py           Qwen2.5-1.5B Handoff RL 主训练脚本
-agent_plan_qwen.py              Qwen2.5-1.5B Plan-then-Execute RL
-sft_warmup_qwen.py              Qwen2.5-1.5B SFT Warmup
-sft_plan_warmup.py              Plan 格式 SFT 数据准备
-eval_handoff.py                 Handoff 评测脚本
-eval_plan.py                    Plan-then-Execute 评测脚本
-scripts/
-  continuous_batching_engine.py CB 推理引擎核心实现
-  benchmark_continuous_batching.py  CB 性能压测
-  serve_openai_api.py           OpenAI 兼容 API 服务
-  data_quality_scorer.py        PPL 数据质量评分与过滤
-  web_demo.py                   WebUI 演示
-  run_*.sh                      各实验启动脚本
-benchmark_logs/                 CB 压测原始日志
-docs/
-  实验记录/                     完整实验报告（5 篇）
-  操作指南/                     DDP 训练等操作文档
-```
 
----
+## Where to look for each contribution
 
-## 实验报告
+### Plan-then-Execute RL
 
-`docs/实验记录/` 目录保存了每个实验方向的完整报告：
+- entry: `agent_plan_qwen.py`
+- launcher: `scripts/run_plan_qwen.sh`
+- evaluation: `eval_plan.py`
+- report: `docs/实验记录/plan_execute_experiment_report.md`
 
-| 报告 | 内容 |
-|------|------|
-| plan_execute_experiment_report.md | Plan-then-Execute 全流程：性能优化（18min→7s/step）+ 两阶段训练 + Demo 诊断 |
-| handoff_qwen_experiment_report.md | Handoff 单步路由：SFT→RL 传递效应发现 + 三方修复方案 |
-| agent_rl_experiment_report.md | 64M Agent RL 完整迭代：v1~v5 + Plan RL v4~v6 + 能力边界确认 |
-| continuous_batching_benchmark_report.md | CB 推理引擎：4 组压测 + Python overhead 根因分析 |
+### Handoff RL and SFT->RL distribution transfer
 
----
+- entry: `agent_handoff_qwen.py`
+- launcher: `scripts/run_handoff_qwen_single.sh`
+- evaluation: `eval_handoff.py`
+- report: `docs/实验记录/handoff_qwen_experiment_report.md`
 
-## 技术栈
+### Data quality filtering
 
-- PyTorch 原生实现，不依赖 trl/peft 高层封装
-- 训练：GRPO/CISPO 策略优化、DDP 分布式、gradient checkpointing + KV cache 推理分离
-- 推理：Continuous Batching 调度、DynamicCache API、OpenAI 兼容 API
-- 数据：PPL 自动过滤、KDE 分布分析、分桶消融实验
+- implementation: `scripts/data_quality_scorer.py`
+- report: `docs/实验记录/agent_rl_experiment_report.md`
 
----
+### Continuous batching
 
-## 快速开始
+- implementation: `scripts/continuous_batching_engine.py`
+- benchmark runner: `scripts/run_benchmark.sh`
+- report: `docs/实验记录/continuous_batching_benchmark_report.md`
+
+## Representative artifacts kept in the public repo
+
+To keep the repo readable, only representative artifacts are retained:
+
+- selected experiment reports in `docs/实验记录/`
+- selected training logs in `trainer/logs/selected/`
+- selected benchmark logs in `benchmark_logs/selected/`
+
+Large volumes of repetitive raw logs and machine-specific debugging traces are intentionally removed from the public version.
+
+## Minimal usage
 
 ```bash
 pip install -r requirements.txt
 
-# Qwen2.5-1.5B Handoff RL 训练（需要 2×A100）
+# Handoff RL
 bash scripts/run_handoff_qwen_single.sh
 
-# Qwen2.5-1.5B Plan-then-Execute RL
+# Plan-then-Execute RL
 bash scripts/run_plan_qwen.sh
 
-# 64M Agent RL 训练（单卡 4090 即可）
-python trainer/train_agent.py --mode train --data_path dataset/xlam_agent_rl.jsonl
-
-# CB 推理引擎压测（Qwen2.5-7B, 单卡 4090）
+# Continuous batching benchmark
 bash scripts/run_benchmark.sh
 
-# 评测
+# Evaluation
 python eval_handoff.py
 python eval_plan.py
 ```
 
----
+## Upstream acknowledgement
 
-## 致谢
-
-本项目基于 [jingyaogong/minimind](https://github.com/jingyaogong/minimind) 开源项目开发，感谢原作者提供的完整训练代码和预训练数据。
+This project is built on top of [jingyaogong/minimind](https://github.com/jingyaogong/minimind). Many experiments here focus on extending that base into agent RL, data-quality engineering, and inference optimization.
 
 ## License
 
